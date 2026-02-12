@@ -41,11 +41,16 @@ if reference_lag>maxlag
     Hab=a;
     if l_<0
         l_ref=l_+reference_lag;
-        Hab_ref=Hab_l(find(lags==l_ref));
     else
         l_ref=l_-reference_lag;
-        Hab_ref=Hab_l(find(lags==l_ref));
     end
+    idx_ref=find(lags==l_ref,1);
+    if isempty(idx_ref)
+        % robust fallback when reference lag falls outside computed support
+        l_ref=max(min(l_ref,lags(end)),lags(1));
+        idx_ref=find(lags==l_ref,1);
+    end
+    Hab_ref=Hab_l(idx_ref);
 else
     % % % decide which is the lag with most coincidences (l_:=best lag)
     ctAB=nan(1,maxlag+1);
@@ -63,7 +68,14 @@ else
         [I,J] = ind2sub(size(aus),b);
         l_=(I==1)*(J-1)-(I==2)*(J-1);  %% I select l_
         if l_==0
-            Hab=ctAB(1); Hab_ref=ctAB_(3);
+            Hab=ctAB(1);
+            % use lag 2 reference when available, otherwise fall back to lag 0
+            % to avoid out-of-bounds indexing for small maxlag values
+            if numel(ctAB_)>=3
+                Hab_ref=ctAB_(3);
+            else
+                Hab_ref=ctAB_(1);
+            end
         else
             Hab=ctAB(J); Hab_ref=ctAB_(J);
         end
@@ -75,11 +87,16 @@ else
         Hab=a;
         if l_<0
             l_ref=l_+reference_lag;
-            Hab_ref=Hab_l(find(lags==l_ref));
         else
             l_ref=l_-reference_lag;
-            Hab_ref=Hab_l(find(lags==l_ref));
         end
+        idx_ref=find(lags==l_ref,1);
+        if isempty(idx_ref)
+            % robust fallback when reference lag falls outside computed support
+            l_ref=max(min(l_ref,lags(end)),lags(1));
+            idx_ref=find(lags==l_ref,1);
+        end
+        Hab_ref=Hab_l(idx_ref);
 
     end
 
@@ -102,7 +119,7 @@ else
 
     % % % construct the activation time series for the couple
     len=size(couple,1);        %%%% trial length
-    Time=uint8(zeros(len,1));  %%%% activation vector
+    Time=zeros(len,1);  %%%% activation vector
 
     if l_==0
         for i=1:maxrate
