@@ -38,16 +38,13 @@ function [As_across_bins,As_across_bins_index,assembly,Assemblies_all_orders]=CA
 %  � 2020 Russo
 %  for information please contact eleonora.russo@zi-mannheim.de
 
+if nargin<4 || isempty(ref_lag), ref_lag=2; end
+if nargin<5 || isempty(alph), alph=0.05; end
+if nargin<6 || isempty(No_th), No_th=0; end
+if nargin<7 || isempty(O_th), O_th=Inf; end
+if nargin<8 || isempty(bytelimit), bytelimit=Inf; end
 
-if nargin<4 || isempty(ref_lag), ref_lag=2; end  
-if nargin<5 || isempty(alph), alph=0.05; end  
-if nargin<6 || isempty(No_th), No_th=0; end      % no limitation on the number of assembly occurrences
-if nargin<7 || isempty(O_th), O_th=Inf; end     % no limitation on the assembly order (=number of elements in the assembly)
-if nargin<8 || isempty(bytelimit), bytelimit=Inf; end     % no limitation on assembly dimension
-
-%%
-
-nneu=size(spM,1); % number of units
+nneu=size(spM,1);
 nBins=length(BinSizes);
 testit=ones(1,nBins);
 binM=cell(1,nBins);
@@ -60,11 +57,19 @@ for gg=1:nBins
     int=BinSizes(gg);
     tb=min(spM(:)):int:max(spM(:));
 
-    binM{gg}=zeros(nneu,length(tb)-1,'uint8');
+    binned_counts=zeros(nneu,length(tb)-1,'uint16');
     number_tests=number_tests+nneu*(nneu-1)*lag_tests(gg)/2;
     for n=1:nneu
-        [ binM{gg}(n,:),~] = histcounts(spM(n,:),tb);
+        [binned_counts(n,:),~]=histcounts(spM(n,:),tb);
     end
+
+    % RAM-aware storage: logical when all counts are binary, uint8 otherwise.
+    if all(binned_counts(:)<=1)
+        binM{gg}=logical(binned_counts);
+    else
+        binM{gg}=uint8(min(binned_counts,uint16(intmax('uint8'))));
+    end
+
     assembly.bin{gg}.n=[];
     assembly.bin{gg}.bin_edges=tb;
     if size(binM{gg},2)-MaxLags(gg)<100
@@ -76,9 +81,8 @@ end
 fprintf('order 1\n')
 clear Assemblies_all_orders
 O=1;
-Dc=100; %length (in # bins) of the segments in which the spike train is divided to compute #abba variance (parameter k).
+Dc=100;
 
-% first order assembly
 npairs=nneu*(nneu-1)/2;
 pair_w1=zeros(npairs,1,'uint32');
 pair_w2=zeros(npairs,1,'uint32');
@@ -100,18 +104,18 @@ parfor pair_idx=1:npairs
     assemblybin=cell(1,nBins);
     p_by_bin=nan(1,nBins);
     for gg=1:nBins
-        assemblybin{gg}=FindAssemblies_recursive_prepruned([binM{gg}(w1,:);binM{gg}(w2,:)],w1,w2,MaxLags(gg),Dc,ref_lag);
+        assemblybin{gg}=FindAssemblies_recursive_prepruned([double(binM{gg}(w1,:));double(binM{gg}(w2,:))],w1,w2,MaxLags(gg),Dc,ref_lag);
         p_values_pairs(pair_idx,gg)=assemblybin{gg}.pr(end);
         assemblybin{gg}.bin=BinSizes(gg);
         assemblybin{gg}.bin_idx=gg;
         p_by_bin(gg)=assemblybin{gg}.pr;
     end
     [~, b]=min(p_by_bin);
-    assembly_selected_xy{pair_idx}=assemblybin{b};
+    assembly_selected_xy{pair_idx}=compact_assembly_struct(assemblybin{b});
 end
 
 p_values=reshape(p_values_pairs.',[],1);
-assembly_selected={};
+assembly_selected=cell(1,npairs);
 keep_idx=1;
 for pair_idx=1:npairs
     candidate=assembly_selected_xy{pair_idx};
@@ -119,18 +123,18 @@ for pair_idx=1:npairs
         continue;
     end
     candidate_bytes=estimate_struct_bytes(candidate);
-    bin_idx=candidate.bin_idx;
+    bin_idx=double(candidate.bin_idx);
     if bin_bytes_used(bin_idx)+candidate_bytes > bytelimit
         continue;
     end
     bin_bytes_used(bin_idx)=bin_bytes_used(bin_idx)+candidate_bytes;
-    assembly_selected{keep_idx}=candidate; %#ok<AGROW>
+    assembly_selected{keep_idx}=candidate;
     keep_idx=keep_idx+1;
 end
+assembly_selected(keep_idx:end)=[];
 
 if ~isempty(assembly_selected)
 
-%% Holm-Bonferroni
 x=1:length(p_values);
 p_values=sort(p_values);
 p_values_alpha=alph./(number_tests+1-x);
@@ -140,54 +144,56 @@ if isempty(aus)
 else
     HBcorrected_p=p_values(aus(end));
 end
-ANfo=zeros(nneu,nneu);
+ANfo=zeros(nneu,nneu,'logical');
 
-for oo=length(assembly_selected):-1:1
+keep_mask=true(1,length(assembly_selected));
+for oo=1:length(assembly_selected)
     if assembly_selected{oo}.pr(end)>HBcorrected_p
-        bin_idx=assembly_selected{oo}.bin_idx;
+        bin_idx=double(assembly_selected{oo}.bin_idx);
         bin_bytes_used(bin_idx)=max(0,bin_bytes_used(bin_idx)-estimate_struct_bytes(assembly_selected{oo}));
-        assembly_selected(oo)=[];
+        keep_mask(oo)=false;
     else
-        ANfo(assembly_selected{oo}.elements(1),assembly_selected{oo}.elements(2))=1;
+        ANfo(double(assembly_selected{oo}.elements(1)),double(assembly_selected{oo}.elements(2)))=true;
     end
 end
+assembly_selected=assembly_selected(keep_mask);
 Assemblies_all_orders{O}=assembly_selected;
 
-%%
-% higher orders
 Oincrement=1;
+flush_chunk=512;
 while Oincrement && O<(O_th-1)
     O=O+1;
     fprintf('order %d\n',O)
     Oincrement=0;
-    assembly_selected_aus={};
+    assembly_selected_aus=cell(1,flush_chunk);
     xx=1;
     p_values_new=cell(1,size(assembly_selected,2));
 
     for w1=1:size(assembly_selected,2)
+        ggg=double(assembly_selected{w1}.bin_idx);
 
-        % bin at which to test w1
-        ggg=assembly_selected{w1}.bin_idx;
-
-        % element to test with w1
-        w1_elements=assembly_selected{w1}.elements;
-        [~, w2_to_test]=find(ANfo(w1_elements,:)==1);   % I try to add only neurons that have significant first order cooccurrences with members of the assembly
-        w2_to_test(ismember(w2_to_test,w1_elements))=[];  % I erase the one that are already in the assembly
+        w1_elements=double(assembly_selected{w1}.elements);
+        [~, w2_to_test]=find(ANfo(w1_elements,:)==1);
+        w2_to_test(ismember(w2_to_test,w1_elements))=[];
         w2_to_test=unique(w2_to_test);
         local_pvals=nan(1,length(w2_to_test));
 
         for ww2=1:length(w2_to_test)
             w2=w2_to_test(ww2);
-            spikeTrain2=binM{ggg}(w2,:)';
+            spikeTrain2=double(binM{ggg}(w2,:))';
             assemblybin_aus=TestPair_ref(assembly_selected{w1},spikeTrain2,w2,MaxLags(ggg),Dc,ref_lag);
             local_pvals(ww2)=assemblybin_aus.pr(end);
             number_tests=number_tests+lag_tests(ggg);
             if assemblybin_aus.pr(end)<HBcorrected_p && assemblybin_aus.Noccurrences(end)>=No_th
                 assemblybin_aus.bin=BinSizes(ggg);
                 assemblybin_aus.bin_idx=ggg;
+                assemblybin_aus=compact_assembly_struct(assemblybin_aus);
                 candidate_bytes=estimate_struct_bytes(assemblybin_aus);
                 if bin_bytes_used(ggg)+candidate_bytes<=bytelimit
-                    assembly_selected_aus{xx}=assemblybin_aus; %#ok<AGROW>
+                    if xx>numel(assembly_selected_aus)
+                        assembly_selected_aus{xx+flush_chunk-1}=[];
+                    end
+                    assembly_selected_aus{xx}=assemblybin_aus;
                     bin_bytes_used(ggg)=bin_bytes_used(ggg)+candidate_bytes;
                     xx=xx+1;
                     Oincrement=1;
@@ -195,6 +201,12 @@ while Oincrement && O<(O_th-1)
             end
         end
         p_values_new{w1}=local_pvals;
+    end
+
+    if xx>1
+        assembly_selected_aus(xx:end)=[];
+    else
+        assembly_selected_aus={};
     end
 
     if ~isempty(p_values_new)
@@ -206,43 +218,10 @@ while Oincrement && O<(O_th-1)
     end
 
     if Oincrement
-        %%% pruning within the same size %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-        % between two assemblies with the same unit set arranged into different configurations I choose the most significant one
-
-        na=length(assembly_selected_aus);                      % number assemblies
-        nelement=size(assembly_selected_aus{1}.elements,2);    % number elements for assembly
-        selection=nan(na,nelement+1+1);
-        assembly_final=cell(1,na);     %max possible dimension
-        nns=1;
-        for i=1:na
-            elem=sort(assembly_selected_aus{i}.elements);
-            [ism,indx]=ismember(elem,selection(:,1:nelement),'rows');
-            if ~ism
-                assembly_final{nns}=assembly_selected_aus{i};
-                selection(nns,1:nelement)=elem;
-                selection(nns,nelement+1)=assembly_selected_aus{i}.pr(end);
-                selection(nns,nelement+2)=i;
-                nns=nns+1;
-            else
-                if selection(indx,nelement+1)>assembly_selected_aus{i}.pr(end)
-                    bin_idx_old=assembly_final{indx}.bin_idx;
-                    bin_bytes_used(bin_idx_old)=max(0,bin_bytes_used(bin_idx_old)-estimate_struct_bytes(assembly_final{indx}));
-                    assembly_final{indx}=assembly_selected_aus{i};
-                    selection(indx,nelement+1)=assembly_selected_aus{i}.pr(end);
-                    selection(indx,nelement+2)=i;
-                else
-                    bin_idx_drop=assembly_selected_aus{i}.bin_idx;
-                    bin_bytes_used(bin_idx_drop)=max(0,bin_bytes_used(bin_idx_drop)-estimate_struct_bytes(assembly_selected_aus{i}));
-                end
-            end
-        end
-        assembly_final(nns:end)=[];
-        assembly_selected=assembly_final;
-        Assemblies_all_orders{O}=assembly_final;
-        clear assembly_final
+        [assembly_selected,bin_bytes_used]=prune_same_size_assemblies(assembly_selected_aus,bin_bytes_used);
+        Assemblies_all_orders{O}=assembly_selected;
     end
 
-    %% Holm-Bonferroni
     x=1:length(p_values);
     p_values=sort(p_values);
     p_values_alpha=alph./(number_tests+1-x);
@@ -252,14 +231,8 @@ while Oincrement && O<(O_th-1)
     else
         HBcorrected_p=p_values(aus(end));
     end
-
-
 end
 
-
-
-
-%% Holm–Bonferroni
 x=1:length(p_values);
 p_values=sort(p_values)';
 p_values_alpha=alph./(number_tests+1-x);
@@ -271,50 +244,53 @@ else
 end
 
 for o=1:length(Assemblies_all_orders)
-    for oo=length(Assemblies_all_orders{o}):-1:1
+    keep_mask=true(1,length(Assemblies_all_orders{o}));
+    for oo=1:length(Assemblies_all_orders{o})
         if Assemblies_all_orders{o}{oo}.pr(end)>HBcorrected_p
-            bin_idx=Assemblies_all_orders{o}{oo}.bin_idx;
+            bin_idx=double(Assemblies_all_orders{o}{oo}.bin_idx);
             bin_bytes_used(bin_idx)=max(0,bin_bytes_used(bin_idx)-estimate_struct_bytes(Assemblies_all_orders{o}{oo}));
-            Assemblies_all_orders{o}(oo)=[];
+            keep_mask(oo)=false;
         end
     end
+    Assemblies_all_orders{o}=Assemblies_all_orders{o}(keep_mask);
 end
 
-%% pruning between differen assembly size
 o=length(Assemblies_all_orders);
 x=1;
-for oo=length(Assemblies_all_orders{o}):-1:1
+Element_template=cell(1,max(1,length(Assemblies_all_orders{o})));
+for oo=1:length(Assemblies_all_orders{o})
     Element_template{x}=Assemblies_all_orders{o}{oo}.elements;
     x=x+1;
 end
 
-
 for o=length(Assemblies_all_orders)-1:-1:1
-    for oo=length(Assemblies_all_orders{o}):-1:1
+    keep_mask=true(1,length(Assemblies_all_orders{o}));
+    for oo=1:length(Assemblies_all_orders{o})
         found=0;
-        ooo=1;
-        while ~found && ooo<x
-            if ismember(Assemblies_all_orders{o}{oo}.elements,Element_template{ooo})
-                bin_idx=Assemblies_all_orders{o}{oo}.bin_idx;
+        for ooo=1:(x-1)
+            if ismember(double(Assemblies_all_orders{o}{oo}.elements),double(Element_template{ooo}))
+                bin_idx=double(Assemblies_all_orders{o}{oo}.bin_idx);
                 bin_bytes_used(bin_idx)=max(0,bin_bytes_used(bin_idx)-estimate_struct_bytes(Assemblies_all_orders{o}{oo}));
-                Assemblies_all_orders{o}(oo)=[];
+                keep_mask(oo)=false;
                 found=1;
-            else
-                ooo=ooo+1;
+                break
             end
         end
         if found==0
+            if x>numel(Element_template)
+                Element_template{x+256}=[];
+            end
             Element_template{x}=Assemblies_all_orders{o}{oo}.elements;
             x=x+1;
         end
     end
+    Assemblies_all_orders{o}=Assemblies_all_orders{o}(keep_mask);
 end
 
-%% reformat dividing by bins
 for o=length(Assemblies_all_orders):-1:1
     for oo=length(Assemblies_all_orders{o}):-1:1
-        bx=Assemblies_all_orders{o}{oo}.bin_idx;
-        assembly.bin{bx}.n=[assembly.bin{bx}.n,Assemblies_all_orders{o}(oo)];
+        bx=double(Assemblies_all_orders{o}{oo}.bin_idx);
+        assembly.bin{bx}.n=[assembly.bin{bx}.n,Assemblies_all_orders{o}(oo)]; %#ok<AGROW>
     end
 end
 for gg=length(BinSizes):-1:1
@@ -326,11 +302,9 @@ end
 fprintf('\n');
 else
     for gg=length(BinSizes):-1:1
-
         assembly.bin{gg}=[];
         Assemblies_all_orders=[];
     end
-
 end
 
 assembly.parameters.alph=alph;
@@ -340,15 +314,78 @@ assembly.parameters.O_th=O_th;
 assembly.parameters.bytelimit=bytelimit;
 assembly.parameters.ref_lag=ref_lag;
 
-
 [As_across_bins,As_across_bins_index]=assemblies_across_bins(assembly,BinSizes);
-
 
 end
 
+function [assembly_out,bin_bytes_used]=prune_same_size_assemblies(assembly_in,bin_bytes_used)
+if isempty(assembly_in)
+    assembly_out={};
+    return
+end
+na=length(assembly_in);
+nelement=size(assembly_in{1}.elements,2);
+selection=nan(na,nelement+1);
+assembly_out=cell(1,na);
+nns=1;
+for i=1:na
+    elem=sort(double(assembly_in{i}.elements));
+    [ism,indx]=ismember(elem,selection(:,1:nelement),'rows');
+    if ~ism
+        assembly_out{nns}=assembly_in{i};
+        selection(nns,1:nelement)=elem;
+        selection(nns,nelement+1)=assembly_in{i}.pr(end);
+        nns=nns+1;
+    else
+        if selection(indx,nelement+1)>assembly_in{i}.pr(end)
+            bin_idx_old=double(assembly_out{indx}.bin_idx);
+            bin_bytes_used(bin_idx_old)=max(0,bin_bytes_used(bin_idx_old)-estimate_struct_bytes(assembly_out{indx}));
+            assembly_out{indx}=assembly_in{i};
+            selection(indx,nelement+1)=assembly_in{i}.pr(end);
+        else
+            bin_idx_drop=double(assembly_in{i}.bin_idx);
+            bin_bytes_used(bin_idx_drop)=max(0,bin_bytes_used(bin_idx_drop)-estimate_struct_bytes(assembly_in{i}));
+        end
+    end
+end
+assembly_out(nns:end)=[];
+end
+
+function assem=compact_assembly_struct(assem)
+if isfield(assem,'elements')
+    assem.elements=uint32(assem.elements);
+end
+if isfield(assem,'lag')
+    assem.lag=int16(assem.lag);
+end
+if isfield(assem,'Noccurrences')
+    assem.Noccurrences=uint32(max(0,assem.Noccurrences));
+end
+if isfield(assem,'bin_idx')
+    assem.bin_idx=uint16(assem.bin_idx);
+end
+if isfield(assem,'Time') && ~isa(assem.Time,'uint16')
+    assem.Time=uint16(max(0,assem.Time));
+end
+end
+
 function out_bytes=estimate_struct_bytes(in_struct)
-% Estimate in-memory bytes of a MATLAB variable.
-v=in_struct; %#ok<NASGU>
-info=whos('v');
-out_bytes=info.bytes;
+% Fast approximate byte estimate to avoid frequent costly WHOS calls.
+out_bytes=0;
+if isfield(in_struct,'elements')
+    out_bytes=out_bytes+4*numel(in_struct.elements);
+end
+if isfield(in_struct,'lag')
+    out_bytes=out_bytes+2*numel(in_struct.lag);
+end
+if isfield(in_struct,'pr')
+    out_bytes=out_bytes+8*numel(in_struct.pr);
+end
+if isfield(in_struct,'Time')
+    out_bytes=out_bytes+2*numel(in_struct.Time);
+end
+if isfield(in_struct,'Noccurrences')
+    out_bytes=out_bytes+4*numel(in_struct.Noccurrences);
+end
+out_bytes=out_bytes+128;
 end

@@ -12,20 +12,19 @@ function [assemD]=TestPair_ref(ensemble,spikeTrain2,n2,maxlag,Dc,reference_lag)
 %  � 2020 Russo
 %  for information please contact eleonora.russo@zi-mannheim.de
 
-
-couple=[ensemble.Time-min(ensemble.Time(:)) spikeTrain2-min(spikeTrain2(:))]; % spike train pair I am going to test
+couple=[double(ensemble.Time)-min(double(ensemble.Time(:))) double(spikeTrain2)-min(double(spikeTrain2(:)))];
 nu=2;
-ntp=size(couple,1);  %%%% trial length
+ntp=size(couple,1);
 
 maxrate=max(couple(:));
-ExpABi=zeros(1,maxrate);
-for i=1:maxrate
-    level_hits=(couple>=i);
-    ExpABi(i)=prod(sum(level_hits,1))/ntp;
+if maxrate==0
+    ExpAB=0;
+else
+    marg_all=marginal_counts_by_level(couple,maxrate);
+    ExpAB=sum((marg_all(1,:).*marg_all(2,:))/ntp);
 end
 
 if reference_lag>maxlag
-    % % % decide which is the lag with most coincidences (l_:=best lag)
     ctAB=nan(1,reference_lag+1);
     ctAB_=nan(1,reference_lag+1);
     for l=0:reference_lag
@@ -39,20 +38,14 @@ if reference_lag>maxlag
     lags=-reference_lag:reference_lag;
     l_=lags(b+reference_lag-maxlag);
     Hab=a;
-    if l_<0
-        l_ref=l_+reference_lag;
-    else
-        l_ref=l_-reference_lag;
-    end
+    if l_<0, l_ref=l_+reference_lag; else, l_ref=l_-reference_lag; end
     idx_ref=find(lags==l_ref,1);
     if isempty(idx_ref)
-        % robust fallback when reference lag falls outside computed support
         l_ref=max(min(l_ref,lags(end)),lags(1));
         idx_ref=find(lags==l_ref,1);
     end
     Hab_ref=Hab_l(idx_ref);
 else
-    % % % decide which is the lag with most coincidences (l_:=best lag)
     ctAB=nan(1,maxlag+1);
     ctAB_=nan(1,maxlag+1);
     for l=0:maxlag
@@ -65,17 +58,11 @@ else
     if reference_lag<=0
         aus=[ctAB; ctAB_];
         [a,b]=max(aus(:));
-        [I,J] = ind2sub(size(aus),b);
-        l_=(I==1)*(J-1)-(I==2)*(J-1);  %% I select l_
+        [I,J]=ind2sub(size(aus),b);
+        l_=(I==1)*(J-1)-(I==2)*(J-1);
         if l_==0
             Hab=ctAB(1);
-            % use lag 2 reference when available, otherwise fall back to lag 0
-            % to avoid out-of-bounds indexing for small maxlag values
-            if numel(ctAB_)>=3
-                Hab_ref=ctAB_(3);
-            else
-                Hab_ref=ctAB_(1);
-            end
+            if numel(ctAB_)>=3, Hab_ref=ctAB_(3); else, Hab_ref=ctAB_(1); end
         else
             Hab=ctAB(J); Hab_ref=ctAB_(J);
         end
@@ -85,77 +72,44 @@ else
         lags=-maxlag:maxlag;
         l_=lags(b);
         Hab=a;
-        if l_<0
-            l_ref=l_+reference_lag;
-        else
-            l_ref=l_-reference_lag;
-        end
+        if l_<0, l_ref=l_+reference_lag; else, l_ref=l_-reference_lag; end
         idx_ref=find(lags==l_ref,1);
         if isempty(idx_ref)
-            % robust fallback when reference lag falls outside computed support
             l_ref=max(min(l_ref,lags(end)),lags(1));
             idx_ref=find(lags==l_ref,1);
         end
         Hab_ref=Hab_l(idx_ref);
-
     end
-
 end
-TPrMTot=[0 Hab; Hab_ref 0]; % matrix with #AB and #BA
+TPrMTot=[0 Hab; Hab_ref 0];
 
-
-%% HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH
-
-
-ExpAB=sum(ExpABi);
-
-if  a==0  || ExpAB<=5  || ExpAB>=(min(sum(couple))-5)    %case of no coincidences or limit for the F asinptotical distribution (too few coincidences)
-    assemD.elements=[ensemble.elements n2];
-    assemD.lag=[ensemble.lag, 99];
-    assemD.pr=[ensemble.pr 1];  % setting pr=1 the tested pair will be discarded as assembly
+if  a==0  || ExpAB<=5  || ExpAB>=(min(sum(couple))-5)
+    assemD.elements=uint32([double(ensemble.elements) n2]);
+    assemD.lag=int16([double(ensemble.lag), 99]);
+    assemD.pr=[double(ensemble.pr) 1];
     assemD.Time=[];
-    assemD.Noccurrences=[ensemble.Noccurrences 0];
+    assemD.Noccurrences=uint32([double(ensemble.Noccurrences) 0]);
 else
-
-    % % % construct the activation time series for the couple
-    len=size(couple,1);        %%%% trial length
-    Time=zeros(len,1);  %%%% activation vector
-
+    len=size(couple,1);
     if l_==0
-        for i=1:maxrate
-            level_hits=(couple>=i);
-            Time=Time+level_hits(:,1).*level_hits(:,2);
-        end
+        Time=min(couple(:,1),couple(:,2));
     elseif l_>0
-        for i=1:maxrate
-            level_hits=(couple>=i);
-            Time(1:len-l_)=Time(1:len-l_)+level_hits(1:end-l_,1).*level_hits(l_+1:end,2);
-        end
+        Time=zeros(len,1);
+        Time(1:len-l_)=min(couple(1:end-l_,1),couple(l_+1:end,2));
     else
-        for i=1:maxrate
-            level_hits=(couple>=i);
-            Time(-l_+1:end)=Time(-l_+1:end)+level_hits(-l_+1:end,1).*level_hits(1:end+l_,2);
-        end
+        Time=zeros(len,1);
+        Time(-l_+1:end)=min(couple(-l_+1:end,1),couple(1:end+l_,2));
     end
 
-
-    %% --------------------------------------------------------------------%
-    % % % HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH
-    % I cut the spike train in stationary segments
-    %%%%%%%%%%%%%%%%%%%%% chunking  %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
     nch=ceil((ntp-maxlag)/Dc);
-    Dc=floor((ntp-maxlag)/nch); %% new chunk size, this is to have all chunks of rougly the same size
+    Dc=floor((ntp-maxlag)/nch);
 
     n=ntp-maxlag;
     varXtot=zeros(2);
 
     for iii=1:nch
         st=(1+Dc*(iii-1));
-        if iii<nch
-            en=Dc*iii;
-        else
-            en=(ntp-maxlag);
-        end
+        if iii<nch, en=Dc*iii; else, en=(ntp-maxlag); end
 
         if l_==0
             couple_t=couple(st:en,:);
@@ -167,12 +121,7 @@ else
 
         ch_n=size(couple_t,1);
         maxrate_t=max(couple_t(:));
-
-        marg_pr=zeros(2,maxrate_t);
-        for i=1:maxrate_t
-            level_hits=(couple_t>=i);
-            marg_pr(:,i)=[sum(level_hits(:,1)); sum(level_hits(:,2))];
-        end
+        marg_pr=marginal_counts_by_level(couple_t,maxrate_t);
 
         varT=zeros(nu);
         covX=zeros(nu);
@@ -196,28 +145,33 @@ else
 
     X=TPrMTot-TPrMTot';
     if abs(X(1,2))>0
-        X=abs(TPrMTot-TPrMTot')-0.5;   %Yates correction
+        X=abs(TPrMTot-TPrMTot')-0.5;
     end
 
-    if varXtot(1,2)==0  % if variance is zero
+    if varXtot(1,2)==0
         prF=1;
     else
         F=X.^2./varXtot;
         prF=fcdf(F(1,2),1,n,'upper');
     end
 
-
-
-    %%
-    %All information about the assembly and test are returned
-
-    assemD.elements=[ensemble.elements n2];
-    assemD.lag=[ensemble.lag, l_];
-    assemD.pr=[ensemble.pr prF];
-    assemD.Time=Time;
-    assemD.Noccurrences=[ensemble.Noccurrences sum(Time)];
-
+    assemD.elements=uint32([double(ensemble.elements) n2]);
+    assemD.lag=int16([double(ensemble.lag), l_]);
+    assemD.pr=[double(ensemble.pr) prF];
+    assemD.Time=uint16(max(0,Time));
+    assemD.Noccurrences=uint32([double(ensemble.Noccurrences) sum(Time)]);
+end
 
 end
 
+function marg_pr=marginal_counts_by_level(couple,maxrate)
+if maxrate<=0
+    marg_pr=zeros(2,0);
+    return
+end
+v1=accumarray(couple(:,1)+1,1,[maxrate+1,1]);
+v2=accumarray(couple(:,2)+1,1,[maxrate+1,1]);
+c1=flipud(cumsum(flipud(v1)));
+c2=flipud(cumsum(flipud(v2)));
+marg_pr=[c1(2:end)'; c2(2:end)'];
 end

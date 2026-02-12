@@ -26,7 +26,7 @@ function [Amatrix,Binvector,Unit_order,As_order]=assembly_assignment_matrix(As_a
 %%  © 2020 Russo
 %  for information please contact eleonora.russo@zi-mannheim.de
 %%
-if nargin<4 , display='raw'; end;  
+if nargin<4 , display='raw'; end
 if nargin == 4
     if ~strcmp(display,'raw') && ~strcmp(display,'ordunit') && ~strcmp(display,'clustered')
         fprintf('''raw'', ''ordunit'', ''clustered'' are the only acceptable style specifications\n')
@@ -34,43 +34,46 @@ if nargin == 4
     end
 end
 
-
-
-
 nAss_final=size(As_across_bins,2);
-AAT=nan(nneu,nAss_final);
 Binvector=nan(1,nAss_final);
 
+% Sparse-first construction to reduce peak RAM for large nneu x nAss matrices.
+rows=[];
+cols=[];
+vals=[];
 for i=1:nAss_final
-    AAT(As_across_bins{i}.elements,i)=As_across_bins{i}.lag;
-    Binvector(i)=(As_across_bins{i}.bin);
+    elems=double(As_across_bins{i}.elements(:));
+    lags=double(As_across_bins{i}.lag(:));
+    rows=[rows; elems]; %#ok<AGROW>
+    cols=[cols; i*ones(numel(elems),1)]; %#ok<AGROW>
+    vals=[vals; lags]; %#ok<AGROW>
+    Binvector(i)=As_across_bins{i}.bin;
 end
+AAT_sparse=sparse(rows,cols,vals,nneu,nAss_final);
+AAT=full(AAT_sparse);
+AAT(AAT==0)=nan;
 
 switch display
-            
     case 'raw'
         Unit_order=1:nneu;
         As_order=1:length(As_across_bins);
-        
+
     case 'ordunit'
-        aus=all(isnan(AAT),2);
-        idx_nan=find(aus==1);
-        idx_activ=find(aus==0);       
-        AAT=[AAT(~~sum(~isnan(AAT),2),:);AAT(~sum(~isnan(AAT),2),:)];   
+        is_empty=all(isnan(AAT),2);
+        idx_nan=find(is_empty);
+        idx_activ=find(~is_empty);
+        AAT=[AAT(~is_empty,:);AAT(is_empty,:)];
         Unit_order=[idx_activ;idx_nan];
         As_order=1:length(As_across_bins);
-        
-    case 'clustered'
-        aus=all(isnan(AAT),2);
-        idx_nan=find(aus==1);
-        idx_activ=find(aus==0);
-        aus=~all(isnan(AAT),2);
-        AAT_activ=AAT(aus,:);
 
-        %%% order on the base of units co-occurrence 
+    case 'clustered'
+        is_empty=all(isnan(AAT),2);
+        idx_nan=find(is_empty);
+        idx_activ=find(~is_empty);
+        AAT_activ=AAT(~is_empty,:);
+
         A01=~isnan(AAT_activ);
         M_assemb=zeros(size(AAT_activ,1));
-
         for n=1:size(A01,2)
             aus=find(A01(:,n)==1);
             M_assemb(aus,aus)=M_assemb(aus,aus)+1;
@@ -82,19 +85,17 @@ switch display
         Q=linkage(d_assemb,'average');
         [~,~,perm]=dendrogram(Q,0);
         perm1=idx_activ(perm);
-        
-        %%% order on the base of assemblies distance assemblies
-        D = pdist(double(~isnan(AAT_activ))');
-        Z = squareform(D);
+
+        D=pdist(double(~isnan(AAT_activ))');
+        Z=squareform(D);
         Q2=linkage(Z,'average');
         [~,~,perm2]=dendrogram(Q2,0);
 
         AAT=AAT_activ(perm,perm2);
         AAT=[AAT; nan(length(idx_nan),size(AAT,2))];
         Unit_order=[perm1;idx_nan];
-        Binvector=Binvector(perm2);         % I apply the same order on the bin size vector
+        Binvector=Binvector(perm2);
         As_order=perm2;
-
 end
 
 Amatrix=AAT;
@@ -102,11 +103,7 @@ binmat=log10(Binvector);
 AAT(end+1,end+1)=0;
 binmat(end+1,end+1)=0;
 
-
-
-
 subplot(2,1,1)
-
 h=pcolor(AAT);
 set(h, 'EdgeColor', [0.8 0.8 0.8]);
 caxis([0, max(AAT(:))])
@@ -116,19 +113,13 @@ set(gca, 'XTick', []);
 hcb=colorbar;
 hcb.Label.String = 'Time lag \it l \rm (# bins)';
 yy = 1:size(AAT,1);
-set(gca,'YTick',yy(1)+0.5:yy(end),'Yticklabel',Unit_order) 
+set(gca,'YTick',yy(1)+0.5:yy(end),'Yticklabel',Unit_order)
 set(gcf, 'Color', [1,1,1]);
 
-        
-        
-        
-
-
 subplot(2,1,2)
-
 pcolor(binmat)
 yy = 1:size(AAT,2);
-set(gca,'XTick',yy(1)+0.5:2:yy(end)+1+0.05,'Xticklabel',As_order(1:2:end)) 
+set(gca,'XTick',yy(1)+0.5:2:yy(end)+1+0.05,'Xticklabel',As_order(1:2:end))
 xlabel('Assembly #')
 set(gca, 'YTick', []);
 hC = colorbar;
@@ -143,9 +134,3 @@ L=[0.001,0.002,0.003,0.004,0.005, 0.006,0.007,0.008,0.009,0.01,0.02,0.03,...
 set(hC,'Ytick',log10(L),'YTicklabel',L);
 set(hC,'Location','southoutside')
 hC.Label.String = 'Temporal precision \Delta (sec)';
-
-
-
-
-
-end
