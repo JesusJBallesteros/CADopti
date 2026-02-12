@@ -5,7 +5,9 @@ function[As_restyled,As_restyled_index]=restyle_assembly_lags_time(A,A_index)
 % accordingly to match the firing of the first assembly unit.
 %
 %
-%  © 2020 Russo
+    shiftedbins=actbins+minlag;
+    validbins=(shiftedbins>=1) & (shiftedbins<=numel(A{i}.Time));
+    As_restyled{i}.Time(shiftedbins(validbins))=double(A{i}.Time(actbins(validbins)));
 %  for information please contact eleonora.russo@zi-mannheim.de
 
 
